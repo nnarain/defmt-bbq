@@ -110,7 +110,11 @@ use core::{
     mem::MaybeUninit,
     sync::atomic::{AtomicBool, AtomicUsize, AtomicU8, Ordering},
 };
+
+#[cfg(target_arch = "arm")]
 use cortex_m::{interrupt, register};
+#[cfg(target_arch = "riscv32")]
+use riscv::{interrupt, register};
 
 /// BBQueue buffer size. Default: 1024; can be customized by setting the
 /// `DEFMT_RTT_BUFFER_SIZE` environment variable at compile time
@@ -428,8 +432,15 @@ struct Logger;
 
 unsafe impl defmt::Logger for Logger {
     fn acquire() {
-        let primask = register::primask::read();
+        #[cfg(target_arch = "arm")]
+        let interrupts_active = register::primask::read().is_active();
+        #[cfg(target_arch = "riscv32")]
+        let interrupts_active = register::mie::read().usoft();
+
+        #[cfg(target_arch = "arm")]
         interrupt::disable();
+        #[cfg(target_arch = "riscv32")]
+        unsafe { interrupt::disable(); }
 
         let state = BBQ_STATE.load(Ordering::Relaxed);
         let taken = TAKEN.load(Ordering::Relaxed);
@@ -457,7 +468,7 @@ unsafe impl defmt::Logger for Logger {
 
         if bail {
             // If we just disabled interrupts, re-enable interrupts, then return
-            if primask.is_active() {
+            if interrupts_active {
                 unsafe { interrupt::enable(); }
             }
             return;
@@ -465,7 +476,7 @@ unsafe impl defmt::Logger for Logger {
 
         // no need for CAS because interrupts are disabled
         TAKEN.store(true, Ordering::Relaxed);
-        INTERRUPTS_ACTIVE.store(primask.is_active(), Ordering::Relaxed);
+        INTERRUPTS_ACTIVE.store(interrupts_active, Ordering::Relaxed);
 
         // safety: accessing the `static mut` is OK because we have disabled interrupts.
         unsafe { ENCODER.start_frame(do_write) }
